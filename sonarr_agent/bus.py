@@ -4,10 +4,14 @@
   ask for an immediate check.
 - serve_mcp(): a minimal MCP server (Streamable HTTP, JSON responses, stateless) on the LAN,
   authenticated with a bearer token. Each tool is annotated readOnlyHint or destructiveHint.
-- Approvals: MCP clients such as Hermes don't ask before calling a destructive tool, so the
-  agent enforces it. A destructive call only creates a pending action and sends a one-time code
-  to APPROVAL_NOTIFY_URLS (a channel the client can't read); confirm_action(action_id, code)
-  then runs exactly the stored call. No approval channel means no actions.
+- Approvals for destructive tools, in one of two modes (APPROVAL_MODE):
+  * "code" (default): the agent enforces it. A destructive call only creates a pending action
+    and sends a one-time code to APPROVAL_NOTIFY_URLS (a channel the client can't read);
+    confirm_action(action_id, code) then runs exactly the stored call.
+  * "client": the MCP client (e.g. a Hermes plugin with Allow/Deny buttons) asks the operator
+    before calling, and the agent trusts that. Every action is announced to
+    APPROVAL_NOTIFY_URLS before it runs (no announcement, no action) and its result after.
+  No approval channel means no actions in either mode.
 - push_alert(): POST a notification digest to a bot; the caller falls back to Apprise if
   the bot can't be reached.
 
@@ -129,8 +133,11 @@ class PendingAction:
 class Approvals:
     """Human approval for destructive tools, enforced here rather than trusted to the MCP client."""
 
-    def __init__(self, agent: str, notify_urls: list[str], ttl_minutes: int = 15, max_attempts: int = 3):
-        self.agent, self.ttl, self.max_attempts = agent, ttl_minutes * 60, max_attempts
+    def __init__(self, agent: str, notify_urls: list[str], ttl_minutes: int = 15, max_attempts: int = 3,
+                 mode: str = "code"):
+        if mode not in ("code", "client"):
+            raise ValueError(f"APPROVAL_MODE must be 'code' or 'client', not {mode!r}")
+        self.agent, self.ttl, self.max_attempts, self.mode = agent, ttl_minutes * 60, max_attempts, mode
         self.apobj = apprise.Apprise()
         for url in notify_urls:
             if not self.apobj.add(url):
@@ -148,6 +155,28 @@ class Approvals:
         except Exception as exc:  # a broken webhook must never let an action through
             log.warning("Approval notification failed: %s", exc)
             return False
+
+    def handle(self, tool: BusTool, args: dict) -> Any:
+        """Entry point for every destructive call."""
+        return self.run_audited(tool, args) if self.mode == "client" else self.request(tool, args)
+
+    def run_audited(self, tool: BusTool, args: dict) -> Any:
+        """Client mode: the client got the operator's approval; run it, announced before and after."""
+        if not self.enabled:
+            return {"status": "refused", "reason": "Actions need an audit channel (APPROVAL_NOTIFY_URLS) and none is "
+                                                   "configured on this agent."}
+        action = PendingAction(secrets.token_hex(3), tool, dict(args), "", 0)
+        if not self._notify(f"{self.agent} agent: running an approved action",
+                            f"▶️ `{action.id}` {action.describe()} (approved in your assistant)"):
+            return {"status": "refused", "reason": "The action couldn't be announced to the audit channel, so it was not run."}
+        log.info("Client-approved action %s: running %s", action.id, tool.name)
+        try:
+            result = tool.fn(**action.args)
+        except Exception as exc:
+            self._notify(f"{self.agent} agent: action failed", f"❌ `{action.id}` {action.describe()}: {exc}")
+            raise
+        self._notify(f"{self.agent} agent: action done", f"✅ `{action.id}` {action.describe()}: {str(result)[:500]}")
+        return {"status": "done", "action": action.describe(), "result": result}
 
     def request(self, tool: BusTool, args: dict) -> dict:
         if not self.enabled:
@@ -204,6 +233,8 @@ class Approvals:
         return {"status": "cancelled" if action else "not_found", "action_id": action_id}
 
     def tools(self) -> list[BusTool]:
+        if self.mode == "client":
+            return []  # no codes to confirm
         return [
             BusTool("confirm_action", f"Run a {self.agent} action the operator approved, using the 6-digit code "
                                       "they give you. Runs exactly the action that was requested.",
@@ -282,9 +313,9 @@ def make_handler(token: str, tools: dict[str, BusTool], server_name: str, versio
                 args = params.get("arguments") or {}
                 log.info("bus call %s(%s)", tool.name, ", ".join(sorted(args)))
                 try:
-                    # Destructive tools never run directly: they wait for an operator-approved code.
+                    # Destructive tools go through the approval policy (code or audited client approval).
                     gated = not tool.read_only and tool.name not in APPROVAL_TOOLS
-                    data = approvals.request(tool, args) if gated else tool.fn(**args)
+                    data = approvals.handle(tool, args) if gated else tool.fn(**args)
                     text, is_error = (data if isinstance(data, str) else json.dumps(data, default=str)), False
                 except TypeError as exc:
                     text, is_error = f"Error: invalid arguments ({exc})", True

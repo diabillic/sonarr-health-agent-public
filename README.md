@@ -131,17 +131,31 @@ Optional. When `AGENT_BUS_TOKEN` is set, the agent serves its tools at `http://<
 [Hermes Agent](https://hermes-agent.nousresearch.com) on Discord, can answer questions with live
 data: `agent_status`, `agent_last_diagnosis`, `agent_run_check` and the agent's domain tools.
 
-**Actions need your approval, enforced by the agent.** MCP clients generally run any tool their
-model picks, so destructive tools (`remove_queue_item`, `import_files`, `run_command`, and `agent_run_check` (a check can apply automatic fixes unless `DRY_RUN=true`); they respect `DRY_RUN`) never run directly. A call creates a pending action
-and the agent sends a **one-time 6-digit code** to `APPROVAL_NOTIFY_URLS`, which must be a channel
-your assistant **cannot read**. The model is told to ask you for it; when you give it the code it
-calls `confirm_action(action_id, code)`, which runs exactly the stored call. Codes expire after 15
-minutes, work once, and three wrong codes cancel the action. Without `APPROVAL_NOTIFY_URLS`,
-actions are refused.
+**Actions always need your approval.** MCP clients generally run any tool their model picks, so
+destructive tools never run unapproved. `APPROVAL_MODE` picks who asks you:
+
+- **`code`** (default, enforced by the agent): a call only queues the action and the agent sends a
+  one-time 6-digit code to `APPROVAL_NOTIFY_URLS`, a channel your assistant **cannot read**. You
+  give the assistant the code and it calls `confirm_action(action_id, code)`, which runs exactly
+  the stored call. Codes expire in 15 minutes, work once, and three wrong codes cancel.
+- **`client`** (buttons in your assistant): the Hermes plugin [`integrations/hermes/homelab-approvals`](integrations/hermes/homelab-approvals) shows
+  **Allow / Deny** buttons before every destructive agent tool, and the agent trusts that. Each
+  action is announced to `APPROVAL_NOTIFY_URLS` **before** it runs (if the announcement fails, it
+  doesn't run) and its result after, so you see everything that runs. Trade-off: if your assistant
+  runs shell commands unsandboxed, its model could read the bus token and call the agent directly,
+  bypassing the buttons; `code` mode isn't affected by that.
+
+Without `APPROVAL_NOTIFY_URLS`, actions are refused in both modes.
+
+Install the plugin: copy the folder to `~/.hermes/plugins/homelab-approvals/`, run
+`hermes plugins enable homelab-approvals`, and restart the gateway. It gates the MCP servers named
+in `AGENT_BUS_SERVERS` (default `sonarr,unraid`), reads which tools are destructive from the agents'
+annotations, and asks for every tool if it can't.
 
 | Kind | Name | Expected value |
 |---|---|---|
 | secret | `AGENT_BUS_TOKEN` | A long random string, also given to your MCP client as `Authorization: Bearer <token>`. Unset disables the endpoint. |
+| variable | `APPROVAL_MODE` | `code` (default) or `client` (see above) |
 | secret | `APPROVAL_NOTIFY_URLS` | Apprise URL(s) for a channel the assistant can't see, e.g. a Discord webhook `https://discord.com/api/webhooks/<id>/<token>` for a channel where the assistant's bot is denied View Channel. |
 | variable | `AGENT_BUS_PORT` | optional, default `8765` |
 | variable | `BOT_ALERT_URL` | optional: POST alerts to a bot endpoint instead of `NOTIFY_URLS` (falls back to `NOTIFY_URLS`) |

@@ -22,7 +22,7 @@ jobs:
           python-version: "3.13"
       - name: Unit tests
         run: |
-          python -m pip install -q -r requirements.txt pytest
+          python -m pip install -q -r requirements.txt pytest pyyaml
           python -m pytest -q
 
   # Deploys only from main, never for pull requests, and only once AGENT_HOST is configured
@@ -52,6 +52,7 @@ jobs:
           BOT_ALERT_URL: ${{ vars.BOT_ALERT_URL }}
           AGENT_BUS_TOKEN: ${{ secrets.AGENT_BUS_TOKEN }}
           APPROVAL_NOTIFY_URLS: ${{ secrets.APPROVAL_NOTIFY_URLS }}
+          APPROVAL_MODE: ${{ vars.APPROVAL_MODE }}
           SONARR_API_KEY: ${{ secrets.SONARR_API_KEY }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           NOTIFY_URLS: ${{ secrets.NOTIFY_URLS }}
@@ -62,7 +63,7 @@ jobs:
           cp -r sonarr_agent requirements.txt stage/
           (umask 077; : > stage/agent.env)
           for v in SONARR_URL SONARR_PUBLIC_URL DRY_RUN INTERVAL_MINUTES HEALTH_IGNORE STALL_MINUTES \
-                   MASS_STALL_THRESHOLD OPENCODE_MODEL OPENCODE_BASE_URL LLM_ACTIONS AGENT_BUS_PORT BOT_ALERT_URL AGENT_BUS_TOKEN APPROVAL_NOTIFY_URLS \
+                   MASS_STALL_THRESHOLD OPENCODE_MODEL OPENCODE_BASE_URL LLM_ACTIONS AGENT_BUS_PORT BOT_ALERT_URL AGENT_BUS_TOKEN APPROVAL_NOTIFY_URLS APPROVAL_MODE \
                    SONARR_API_KEY OPENCODE_API_KEY NOTIFY_URLS; do
             if [ -n "${!v}" ]; then printf '%s=%s\n' "$v" "${!v}" >> stage/agent.env; fi
           done

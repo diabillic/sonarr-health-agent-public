@@ -61,6 +61,7 @@ class Config:
     bot_alert_url: str = ""
     # Where one-time approval codes for bus actions go: a channel the MCP client can't read
     approval_urls: list[str] = field(default_factory=list)
+    approval_mode: str = "code"  # "code" (agent-enforced) or "client" (assistant asks; audited)
 
     @property
     def escalation_enabled(self) -> bool:
@@ -101,4 +102,5 @@ class Config:
             bus_port=_int("AGENT_BUS_PORT", 8765),
             bot_alert_url=os.environ.get("BOT_ALERT_URL", "").strip(),
             approval_urls=_list("APPROVAL_NOTIFY_URLS"),
+            approval_mode=os.environ.get("APPROVAL_MODE", "").strip().lower() or "code",
         )
