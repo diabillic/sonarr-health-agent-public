@@ -1,3 +1,4 @@
+import json
 import copy
 from datetime import datetime, timedelta, timezone
 
@@ -310,3 +311,122 @@ def test_escalation_disabled_without_key(tmp_path):
     from sonarr_agent.findings import Finding
     c = cfg(tmp_path)
     assert escalate(FakeSonarr(), State(c.state_path), c, [Finding("k", "x", escalate=True)]) is None
+
+
+# --- agent bus (MCP endpoint for the Discord bot, alert hand-off) ---
+
+class FakeApprise:
+    def __init__(self, sent, ok=True):
+        self.sent, self.ok = sent, ok
+
+    def __len__(self):
+        return 1
+
+    def notify(self, title, body):
+        self.sent.append((title, body))
+        return self.ok
+
+
+def test_approvals_codes_attempts_expiry_and_fail_closed():
+    from sonarr_agent.bus import Approvals, BusTool, schema
+    ran = []
+    tool = BusTool("remove_queue_item", "remove", schema(), lambda queue_id: ran.append(queue_id) or "removed", read_only=False)
+    sent = []
+    ap = Approvals("sonarr", [])
+    assert ap.request(tool, {"queue_id": 1})["status"] == "refused"  # no approval channel: no actions
+    ap.apobj = FakeApprise(sent)
+    req = ap.request(tool, {"queue_id": 1})
+    code = sent[-1][0].split()[-1]
+    assert len(code) == 6 and code.isdigit() and code not in json.dumps(req) and ran == []
+    wrong = "000000" if code != "000000" else "111111"
+    assert "2 attempt(s) left" in ap.confirm(req["action_id"], wrong)["reason"]
+    assert "1 attempt(s) left" in ap.confirm(req["action_id"], wrong)["reason"]
+    assert "cancelled" in ap.confirm(req["action_id"], wrong)["reason"] and "cancelled" in sent[-1][0]
+    assert ap.confirm(req["action_id"], code)["status"] == "refused" and ran == []  # gone after 3 misses
+    req = ap.request(tool, {"queue_id": 2})
+    ap._pending[req["action_id"]].expires = 0  # expired
+    assert ap.confirm(req["action_id"], sent[-1][0].split()[-1])["status"] == "refused" and ran == []
+    req = ap.request(tool, {"queue_id": 3})
+    assert ap.cancel(req["action_id"])["status"] == "cancelled"
+    ap.apobj = FakeApprise(sent, ok=False)  # code can't be delivered: nothing is queued
+    assert ap.request(tool, {"queue_id": 4})["status"] == "refused" and not ap._pending
+
+
+def _rpc(url, token, method, params=None, id_=1):
+    import requests
+    body = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+    if id_ is not None:
+        body["id"] = id_
+    return requests.post(url, json=body, headers={"Authorization": f"Bearer {token}"}, timeout=5)
+
+
+def test_bus_mcp_endpoint_end_to_end(tmp_path):
+    from sonarr_agent.__main__ import ACTION_TOOLS
+    from sonarr_agent.bus import Approvals, BusTool, Runtime, schema, serve_mcp
+    from sonarr_agent.findings import Finding
+
+    rt = Runtime("sonarr", revision="abc123")
+    rt.record([Finding("dl:x", "'Show' removed and blocklisted.", "info", resolved=True)], "1. do the thing")
+    tools = rt.common_tools(check_is_destructive=True) + [
+        BusTool("get_queue", "queue", schema(), lambda: [{"id": 1}]),
+        BusTool("remove_queue_item", "remove", schema({"queue_id": {"type": "integer"}}, ["queue_id"]),
+                lambda queue_id: f"removed {queue_id}", read_only=False),
+        BusTool("boom", "fails", schema(), lambda: 1 / 0),
+    ]
+    approvals, sent = Approvals("sonarr", []), []
+    approvals.apobj = FakeApprise(sent)
+    server = serve_mcp("127.0.0.1", 0, "s3cret", tools, "sonarr-agent", approvals)
+    url = f"http://127.0.0.1:{server.server_address[1]}/mcp"
+    try:
+        assert _rpc(url, "wrong", "tools/list").status_code == 401
+        init = _rpc(url, "s3cret", "initialize", {"protocolVersion": "2025-06-18"}).json()["result"]
+        assert init["serverInfo"]["name"] == "sonarr-agent" and "tools" in init["capabilities"]
+        assert _rpc(url, "s3cret", "notifications/initialized", id_=None).status_code == 202
+        listed = {t["name"]: t["annotations"] for t in _rpc(url, "s3cret", "tools/list").json()["result"]["tools"]}
+        assert listed["get_queue"]["readOnlyHint"] and listed["remove_queue_item"]["destructiveHint"]
+        assert listed["agent_run_check"]["destructiveHint"]  # sonarr checks can apply fixes when not in dry run
+        status = _rpc(url, "s3cret", "tools/call", {"name": "agent_status", "arguments": {}}).json()["result"]
+        assert '"dl:x"' in status["content"][0]["text"] and not status["isError"]
+        # A destructive call only queues the action; the code goes out of band, never to the caller.
+        res = _rpc(url, "s3cret", "tools/call", {"name": "remove_queue_item", "arguments": {"queue_id": 7}}).json()["result"]
+        pending = json.loads(res["content"][0]["text"])
+        code = sent[-1][0].split()[-1]
+        assert pending["status"] == "approval_required" and code not in res["content"][0]["text"]
+        assert listed["confirm_action"]["destructiveHint"] and "cancel_action" in listed
+        confirm = {"name": "confirm_action", "arguments": {"action_id": pending["action_id"], "code": code}}
+        done = json.loads(_rpc(url, "s3cret", "tools/call", confirm).json()["result"]["content"][0]["text"])
+        assert done == {"status": "approved", "action": "remove_queue_item(queue_id=7)", "result": "removed 7"}
+        again = json.loads(_rpc(url, "s3cret", "tools/call", confirm).json()["result"]["content"][0]["text"])
+        assert again["status"] == "refused"  # single use
+        assert _rpc(url, "s3cret", "tools/call", {"name": "boom", "arguments": {}}).json()["result"]["isError"]
+        assert _rpc(url, "s3cret", "tools/call", {"name": "get_queue", "arguments": {"x": 1}}).json()["result"]["isError"]
+        assert "error" in _rpc(url, "s3cret", "tools/call", {"name": "nope"}).json()
+        assert _rpc(url, "s3cret", "agent_run_check").json()["error"]["code"] == -32601
+        _rpc(url, "s3cret", "tools/call", {"name": "agent_run_check", "arguments": {}})
+        assert not rt.wake.is_set()  # a check that can apply fixes is gated too
+    finally:
+        server.shutdown()
+    assert ACTION_TOOLS == {"remove_queue_item", "import_files", "run_command"}
+
+
+def test_bus_tools_mark_sonarr_actions_destructive(tmp_path):
+    from sonarr_agent.__main__ import bus_tools
+    from sonarr_agent.bus import Runtime
+    tools = {t.name: t for t in bus_tools(cfg(tmp_path), Runtime("sonarr"))}
+    assert not tools["remove_queue_item"].read_only and not tools["import_files"].read_only
+    assert tools["get_queue"].read_only and tools["agent_status"].read_only
+
+
+def test_alerts_go_to_bot_first_then_fall_back(tmp_path, monkeypatch):
+    from sonarr_agent import notify
+    from sonarr_agent.findings import Finding
+    sent, pushed = [], []
+    st = State(str(tmp_path / "s.json"))
+    n = notify.Notifier([], 12, st, bot_url="http://bot:8766/alert", bot_token="t")
+    n.apobj = type("A", (), {"__len__": lambda s: 1, "notify": lambda s, title, body: sent.append(title) or True})()
+    monkeypatch.setattr(notify, "push_alert", lambda *a: pushed.append(a[2:5]) or True)
+    n.send([Finding("k1", "broken", "error")])
+    assert len(pushed) == 1 and pushed[0][0] == "sonarr" and sent == []
+    monkeypatch.setattr(notify, "push_alert", lambda *a: False)  # bot down: webhook fallback
+    n.send([Finding("k2", "also broken", "error")])
+    assert len(sent) == 1
