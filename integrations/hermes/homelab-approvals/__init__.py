@@ -57,12 +57,21 @@ def _watched() -> set[str]:
     return {s.strip() for s in raw.split(",") if s.strip()}
 
 
-def _server_config(name: str) -> tuple[str, dict[str, str]] | None:
-    import yaml  # bundled with Hermes
-
+def _load_config() -> dict:
     try:
-        cfg = yaml.safe_load((_hermes_home() / "config.yaml").read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError):
+        from hermes_cli.config import read_raw_config  # Hermes's own loader (no PyYAML in its runtime)
+    except ImportError:
+        import yaml  # outside Hermes, e.g. tests
+
+        return yaml.safe_load((_hermes_home() / "config.yaml").read_text(encoding="utf-8")) or {}
+    return read_raw_config() or {}
+
+
+def _server_config(name: str) -> tuple[str, dict[str, str]] | None:
+    try:
+        cfg = _load_config()
+    except Exception as exc:  # caller fails closed
+        log.warning("homelab-approvals: can't read Hermes config (%s)", exc)
         return None
     server = (cfg.get("mcp_servers") or {}).get(name) or {}
     if not server.get("url"):
@@ -101,7 +110,11 @@ def pre_tool_call(tool_name: str = "", args: dict | None = None, task_id: str = 
     if not m or m.group(1) not in _watched():
         return None
     server, tool = m.groups()
-    destructive = destructive_tools(server)
+    try:
+        destructive = destructive_tools(server)
+    except Exception as exc:  # a hook error must still end in a prompt, never a silent run or a crash
+        log.warning("homelab-approvals: %s; asking", exc)
+        destructive = None
     if destructive is not None and tool not in destructive:
         return None  # read-only: no prompt
     args = args or {}

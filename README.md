@@ -152,6 +152,11 @@ Install the plugin: copy the folder to `~/.hermes/plugins/homelab-approvals/`, r
 in `AGENT_BUS_SERVERS` (default `sonarr,unraid`), reads which tools are destructive from the agents'
 annotations, and asks for every tool if it can't.
 
+How long Hermes waits for an answer is `approvals.timeout` in `~/.hermes/config.yaml` (seconds,
+default 300). Discord buttons expire sooner: `approvals.discord_prompt_timeout` is capped by Hermes
+at 900. After that, reply `/approve` or `/deny` in the same channel until `approvals.timeout`
+runs out. While an approval is pending, that conversation waits on it.
+
 | Kind | Name | Expected value |
 |---|---|---|
 | secret | `AGENT_BUS_TOKEN` | A long random string, also given to your MCP client as `Authorization: Bearer <token>`. Unset disables the endpoint. |

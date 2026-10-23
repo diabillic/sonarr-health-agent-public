@@ -523,3 +523,11 @@ def test_hermes_plugin_fails_closed_when_agent_unreachable(tmp_path, monkeypatch
     p = _load_plugin(tmp_path, monkeypatch, "http://127.0.0.1:9/mcp")
     d = p.pre_tool_call("mcp__sonarr__get_queue", {})
     assert d["action"] == "approve" and "every tool asks" in d["message"]
+
+
+def test_hermes_plugin_asks_when_it_cannot_read_config(tmp_path, monkeypatch):
+    # Hermes's runtime has no PyYAML; a missing reader once raised inside the hook instead of asking.
+    p = _load_plugin(tmp_path, monkeypatch, "http://127.0.0.1:9/mcp")
+    monkeypatch.setattr(p, "_load_config", lambda: (_ for _ in ()).throw(ImportError("No module named 'yaml'")))
+    d = p.pre_tool_call("mcp__sonarr__get_queue", {})
+    assert d["action"] == "approve" and "every tool asks" in d["message"]
