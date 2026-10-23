@@ -10,7 +10,7 @@ The rule_key is per exact call (tool + argument hash), so "Session" / "Always" c
 silently cover a different action.
 
 Settings (Hermes .env or environment):
-  AGENT_BUS_SERVERS  comma-separated mcp_servers names to gate (default: sonarr,unraid)
+  AGENT_BUS_SERVERS  comma-separated mcp_servers names to gate (default: sonarr,unraid,patch)
 
 Pair it with APPROVAL_MODE=client on the agents, which then trust this approval and announce
 every action to their audit channel before running it.
@@ -53,7 +53,7 @@ def _env() -> dict[str, str]:
 
 
 def _watched() -> set[str]:
-    raw = _env().get("AGENT_BUS_SERVERS") or "sonarr,unraid"
+    raw = _env().get("AGENT_BUS_SERVERS") or "sonarr,unraid,patch"
     return {s.strip() for s in raw.split(",") if s.strip()}
 
 

@@ -149,7 +149,7 @@ Without `APPROVAL_NOTIFY_URLS`, actions are refused in both modes.
 
 Install the plugin: copy the folder to `~/.hermes/plugins/homelab-approvals/`, run
 `hermes plugins enable homelab-approvals`, and restart the gateway. It gates the MCP servers named
-in `AGENT_BUS_SERVERS` (default `sonarr,unraid`), reads which tools are destructive from the agents'
+in `AGENT_BUS_SERVERS` (default `sonarr,unraid,patch`), reads which tools are destructive from the agents'
 annotations, and asks for every tool if it can't.
 
 How long Hermes waits for an answer is `approvals.timeout` in `~/.hermes/config.yaml` (seconds,
