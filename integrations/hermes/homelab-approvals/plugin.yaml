@@ -1,0 +1,3 @@
+name: homelab-approvals
+version: "1.0"
+description: Ask the operator (Allow / Deny) before any destructive agent-bus MCP tool runs

@@ -447,3 +447,79 @@ def test_deploy_renders_every_setting_it_is_given():
     loop = re.search(r"for v in (.*?); do", run_block, re.S).group(1)
     written = set(re.findall(r"[A-Z_]+", loop))
     assert given - written == set(), f"passed to the step but never written to agent.env: {sorted(given - written)}"
+
+
+def test_client_approval_mode_runs_audited_and_fails_closed():
+    from sonarr_agent.bus import Approvals, BusTool, schema
+    events = []
+    tool = BusTool("remove_queue_item", "remove", schema(), lambda queue_id: events.append(("ran", queue_id)) or "removed",
+                   read_only=False)
+
+    class Recorder(FakeApprise):
+        def notify(self, title, body):
+            events.append(("notice", title))
+            return self.ok
+
+    ap = Approvals("sonarr", [], mode="client")
+    assert ap.handle(tool, {"queue_id": 1})["status"] == "refused" and events == []  # no audit channel: no action
+    ap.apobj = Recorder([])
+    out = ap.handle(tool, {"queue_id": 2})
+    assert out == {"status": "done", "action": "remove_queue_item(queue_id=2)", "result": "removed"}
+    assert [e[0] for e in events] == ["notice", "ran", "notice"]  # announced BEFORE it runs, result after
+    assert ap.tools() == []  # no code tools in client mode
+    events.clear()
+    ap.apobj = Recorder([], ok=False)  # can't announce: refuse without running
+    assert ap.handle(tool, {"queue_id": 3})["status"] == "refused" and ("ran", 3) not in events
+    boom = BusTool("run_command", "x", schema(), lambda: 1 / 0, read_only=False)
+    ap.apobj = Recorder([])
+    with pytest.raises(ZeroDivisionError):
+        ap.handle(boom, {})
+    assert "failed" in events[-1][1]
+    with pytest.raises(ValueError):
+        Approvals("sonarr", [], mode="yolo")
+
+
+# --- Hermes plugin (integrations/hermes/homelab-approvals) ---
+
+def _load_plugin(tmp_path, monkeypatch, bus_url):
+    import importlib.util
+    import pathlib
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / ".env").write_text("AGENT_BUS_TOKEN=s3cret\nAGENT_BUS_SERVERS=sonarr\n")
+    (home / "config.yaml").write_text(
+        f'mcp_servers:\n  sonarr:\n    url: "{bus_url}"\n    headers:\n      Authorization: "Bearer ${{AGENT_BUS_TOKEN}}"\n')
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    path = pathlib.Path(__file__).resolve().parent.parent / "integrations" / "hermes" / "homelab-approvals" / "__init__.py"
+    spec = importlib.util.spec_from_file_location("homelab_approvals_plugin", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_hermes_plugin_gates_only_destructive_agent_tools(tmp_path, monkeypatch):
+    pytest.importorskip("yaml")
+    from sonarr_agent.bus import Approvals, BusTool, Runtime, schema, serve_mcp
+    tools = Runtime("sonarr").common_tools(check_is_destructive=True) + [
+        BusTool("get_queue", "q", schema(), lambda: []),
+        BusTool("remove_queue_item", "r", schema(), lambda **a: "x", read_only=False)]
+    server = serve_mcp("127.0.0.1", 0, "s3cret", tools, "sonarr-agent", Approvals("sonarr", [], mode="client"))
+    try:
+        p = _load_plugin(tmp_path, monkeypatch, f"http://127.0.0.1:{server.server_address[1]}/mcp")
+        assert p.pre_tool_call("mcp__sonarr__get_queue", {}) is None  # read-only: no prompt
+        assert p.pre_tool_call("mcp__unraid__unraid_docker_restart", {"id": "plex"}) is None  # not watched here
+        assert p.pre_tool_call("terminal", {"command": "ls"}) is None  # not an MCP tool
+        d = p.pre_tool_call("mcp__sonarr__remove_queue_item", {"queue_id": 7, "blocklist": True})
+        assert d["action"] == "approve" and "remove_queue_item(queue_id=7, blocklist=true)" in d["message"]
+        d2 = p.pre_tool_call("mcp__sonarr__remove_queue_item", {"queue_id": 8, "blocklist": True})
+        assert d["rule_key"] != d2["rule_key"]  # "Always" can't cover a different action
+        assert p.pre_tool_call("mcp__sonarr__agent_run_check", {})["action"] == "approve"
+    finally:
+        server.shutdown()
+
+
+def test_hermes_plugin_fails_closed_when_agent_unreachable(tmp_path, monkeypatch):
+    pytest.importorskip("yaml")
+    p = _load_plugin(tmp_path, monkeypatch, "http://127.0.0.1:9/mcp")
+    d = p.pre_tool_call("mcp__sonarr__get_queue", {})
+    assert d["action"] == "approve" and "every tool asks" in d["message"]
