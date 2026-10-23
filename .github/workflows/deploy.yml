@@ -1,0 +1,74 @@
+name: test-and-deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-sonarr-agent
+  cancel-in-progress: false
+
+jobs:
+  # Tests run on GitHub-hosted runners, so pull requests (including from forks) never touch
+  # your self-hosted runner.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Unit tests
+        run: |
+          python -m pip install -q -r requirements.txt pytest
+          python -m pytest -q
+
+  # Deploys only from main, never for pull requests, and only once AGENT_HOST is configured
+  # (see README: Secrets and variables), so a fresh clone doesn't queue jobs for a missing runner.
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.AGENT_HOST != ''
+    runs-on: [self-hosted, proxmox]
+    env:
+      AGENT_HOST: ${{ vars.AGENT_HOST }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Render agent.env
+        env:
+          SONARR_URL: ${{ vars.SONARR_URL }}
+          SONARR_PUBLIC_URL: ${{ vars.SONARR_PUBLIC_URL }}
+          DRY_RUN: ${{ vars.DRY_RUN || 'true' }}
+          INTERVAL_MINUTES: ${{ vars.INTERVAL_MINUTES }}
+          HEALTH_IGNORE: ${{ vars.HEALTH_IGNORE }}
+          STALL_MINUTES: ${{ vars.STALL_MINUTES }}
+          MASS_STALL_THRESHOLD: ${{ vars.MASS_STALL_THRESHOLD }}
+          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL }}
+          OPENCODE_BASE_URL: ${{ vars.OPENCODE_BASE_URL }}
+          LLM_ACTIONS: ${{ vars.LLM_ACTIONS }}
+          SONARR_API_KEY: ${{ secrets.SONARR_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          NOTIFY_URLS: ${{ secrets.NOTIFY_URLS }}
+        run: |
+          [ -n "$AGENT_HOST" ] || { echo "::error::repo variable AGENT_HOST is not set"; exit 1; }
+          [ -n "$SONARR_URL" ] && [ -n "$SONARR_API_KEY" ] || { echo "::error::SONARR_URL (variable) and SONARR_API_KEY (secret) are required"; exit 1; }
+          mkdir -p stage
+          cp -r sonarr_agent requirements.txt stage/
+          (umask 077; : > stage/agent.env)
+          for v in SONARR_URL SONARR_PUBLIC_URL DRY_RUN INTERVAL_MINUTES HEALTH_IGNORE STALL_MINUTES \
+                   MASS_STALL_THRESHOLD OPENCODE_MODEL OPENCODE_BASE_URL LLM_ACTIONS \
+                   SONARR_API_KEY OPENCODE_API_KEY NOTIFY_URLS; do
+            if [ -n "${!v}" ]; then printf '%s=%s\n' "$v" "${!v}" >> stage/agent.env; fi
+          done
+          echo "$GITHUB_SHA" > stage/REVISION
+
+      - name: Ship and install
+        run: |
+          rsync -a --delete --exclude '__pycache__' stage/ "deploy@$AGENT_HOST:staging/"
+          ssh "deploy@$AGENT_HOST" sudo /usr/local/sbin/sonarr-agent-install
+
+      - name: Clean up rendered secrets
+        if: always()
+        run: rm -rf stage

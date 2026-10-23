@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Installed as /usr/local/sbin/sonarr-agent-install in the agent LXC; run by `deploy` via sudo.
+# Promotes /home/deploy/staging into /opt/sonarr-agent, restarts the service, and rolls
+# back to the previous release if the service doesn't stay up.
+set -euo pipefail
+
+STAGE=/home/deploy/staging
+ROOT=/opt/sonarr-agent
+UNIT=/etc/systemd/system/sonarr-agent.service
+
+[[ -d "$STAGE/sonarr_agent" && -f "$STAGE/requirements.txt" && -f "$STAGE/agent.env" ]] \
+  || { echo "staging is incomplete" >&2; exit 1; }
+
+# Config: root-owned, readable by the service account only.
+install -m 640 -o root -g sonarr-agent "$STAGE/agent.env" /etc/sonarr-agent/agent.env
+
+# Rebuild the venv only when requirements change.
+req_hash=$(sha256sum "$STAGE/requirements.txt" | cut -d' ' -f1)
+if [[ ! -x "$ROOT/venv/bin/python" || "$(cat "$ROOT/venv/.req-hash" 2>/dev/null)" != "$req_hash" ]]; then
+  echo "Building venv"
+  rm -rf "$ROOT/venv.new"
+  python3 -m venv "$ROOT/venv.new"
+  "$ROOT/venv.new/bin/pip" install -q --no-cache-dir -r "$STAGE/requirements.txt"
+  echo "$req_hash" > "$ROOT/venv.new/.req-hash"
+  rm -rf "$ROOT/venv.prev"; [[ -d "$ROOT/venv" ]] && mv "$ROOT/venv" "$ROOT/venv.prev"
+  mv "$ROOT/venv.new" "$ROOT/venv"
+fi
+
+rm -rf "$ROOT/app.new"
+install -d "$ROOT/app.new"
+cp -r "$STAGE/sonarr_agent" "$STAGE/requirements.txt" "$ROOT/app.new/"
+[[ -f "$STAGE/REVISION" ]] && cp "$STAGE/REVISION" "$ROOT/app.new/"
+# Normalise modes: staged files can arrive owner-only; the service account must read them.
+chown -R root:root "$ROOT/app.new"
+chmod -R u=rwX,go=rX "$ROOT/app.new"
+rm -rf "$ROOT/app.prev"; [[ -d "$ROOT/app" ]] && mv "$ROOT/app" "$ROOT/app.prev"
+mv "$ROOT/app.new" "$ROOT/app"
+
+cat > "$UNIT" <<'EOF'
+[Unit]
+Description=Sonarr health agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sonarr-agent
+Group=sonarr-agent
+Environment=STATE_PATH=/var/lib/sonarr-agent/state.json
+EnvironmentFile=/etc/sonarr-agent/agent.env
+WorkingDirectory=/opt/sonarr-agent/app
+ExecStart=/opt/sonarr-agent/venv/bin/python -m sonarr_agent
+StateDirectory=sonarr-agent
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable sonarr-agent >/dev/null 2>&1
+systemctl restart sonarr-agent
+
+# Healthy = still active after 20s (config errors exit immediately; first cycle runs right away).
+sleep 20
+if systemctl is-active --quiet sonarr-agent; then
+  echo "sonarr-agent running $(cat "$ROOT/app/REVISION" 2>/dev/null || echo '')"
+  journalctl -u sonarr-agent -n 15 --no-pager -o cat
+  exit 0
+fi
+
+echo "sonarr-agent failed to start; rolling back" >&2
+journalctl -u sonarr-agent -n 40 --no-pager -o cat >&2
+if [[ -d "$ROOT/app.prev" ]]; then
+  rm -rf "$ROOT/app.failed"; mv "$ROOT/app" "$ROOT/app.failed"; mv "$ROOT/app.prev" "$ROOT/app"
+  [[ -d "$ROOT/venv.prev" ]] && { rm -rf "$ROOT/venv"; mv "$ROOT/venv.prev" "$ROOT/venv"; }
+  systemctl restart sonarr-agent
+fi
+exit 1
