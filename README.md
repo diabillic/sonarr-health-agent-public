@@ -124,6 +124,39 @@ cat /opt/sonarr-agent/app/REVISION                     # deployed commit
 State (stall timers, cooldowns, notification dedupe) is `/var/lib/sonarr-agent/state.json`;
 deleting it just restarts the timers.
 
+## Agent bus (MCP for an assistant such as Hermes Agent)
+
+Optional. When `AGENT_BUS_TOKEN` is set, the agent serves its tools at `http://<agent>:8765/mcp`
+(Streamable HTTP MCP, bearer token) so an assistant you chat with, for example
+[Hermes Agent](https://hermes-agent.nousresearch.com) on Discord, can answer questions with live
+data: `agent_status`, `agent_last_diagnosis`, `agent_run_check` and the agent's domain tools.
+
+**Actions need your approval, enforced by the agent.** MCP clients generally run any tool their
+model picks, so destructive tools (`remove_queue_item`, `import_files`, `run_command`, and `agent_run_check` (a check can apply automatic fixes unless `DRY_RUN=true`); they respect `DRY_RUN`) never run directly. A call creates a pending action
+and the agent sends a **one-time 6-digit code** to `APPROVAL_NOTIFY_URLS`, which must be a channel
+your assistant **cannot read**. The model is told to ask you for it; when you give it the code it
+calls `confirm_action(action_id, code)`, which runs exactly the stored call. Codes expire after 15
+minutes, work once, and three wrong codes cancel the action. Without `APPROVAL_NOTIFY_URLS`,
+actions are refused.
+
+| Kind | Name | Expected value |
+|---|---|---|
+| secret | `AGENT_BUS_TOKEN` | A long random string, also given to your MCP client as `Authorization: Bearer <token>`. Unset disables the endpoint. |
+| secret | `APPROVAL_NOTIFY_URLS` | Apprise URL(s) for a channel the assistant can't see, e.g. a Discord webhook `https://discord.com/api/webhooks/<id>/<token>` for a channel where the assistant's bot is denied View Channel. |
+| variable | `AGENT_BUS_PORT` | optional, default `8765` |
+| variable | `BOT_ALERT_URL` | optional: POST alerts to a bot endpoint instead of `NOTIFY_URLS` (falls back to `NOTIFY_URLS`) |
+
+Example Hermes `~/.hermes/config.yaml` entry (token kept in `~/.hermes/.env`):
+
+```yaml
+mcp_servers:
+  sonarr:
+    url: "http://192.168.1.21:8765/mcp"
+    headers:
+      Authorization: "Bearer ${AGENT_BUS_TOKEN}"
+    timeout: 180
+```
+
 ## Develop
 
 ```bash

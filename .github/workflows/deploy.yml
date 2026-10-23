@@ -48,6 +48,10 @@ jobs:
           OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL }}
           OPENCODE_BASE_URL: ${{ vars.OPENCODE_BASE_URL }}
           LLM_ACTIONS: ${{ vars.LLM_ACTIONS }}
+          AGENT_BUS_PORT: ${{ vars.AGENT_BUS_PORT }}
+          BOT_ALERT_URL: ${{ vars.BOT_ALERT_URL }}
+          AGENT_BUS_TOKEN: ${{ secrets.AGENT_BUS_TOKEN }}
+          APPROVAL_NOTIFY_URLS: ${{ secrets.APPROVAL_NOTIFY_URLS }}
           SONARR_API_KEY: ${{ secrets.SONARR_API_KEY }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           NOTIFY_URLS: ${{ secrets.NOTIFY_URLS }}
@@ -58,7 +62,7 @@ jobs:
           cp -r sonarr_agent requirements.txt stage/
           (umask 077; : > stage/agent.env)
           for v in SONARR_URL SONARR_PUBLIC_URL DRY_RUN INTERVAL_MINUTES HEALTH_IGNORE STALL_MINUTES \
-                   MASS_STALL_THRESHOLD OPENCODE_MODEL OPENCODE_BASE_URL LLM_ACTIONS \
+                   MASS_STALL_THRESHOLD OPENCODE_MODEL OPENCODE_BASE_URL LLM_ACTIONS AGENT_BUS_PORT BOT_ALERT_URL AGENT_BUS_TOKEN \
                    SONARR_API_KEY OPENCODE_API_KEY NOTIFY_URLS; do
             if [ -n "${!v}" ]; then printf '%s=%s\n' "$v" "${!v}" >> stage/agent.env; fi
           done

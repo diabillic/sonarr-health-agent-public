@@ -55,6 +55,13 @@ class Config:
     llm_actions: bool = False
     escalate_cooldown_hours: int = 24
 
+    # Agent bus: MCP endpoint for the Discord bot, and where to hand it alerts
+    bus_token: str = ""
+    bus_port: int = 8765
+    bot_alert_url: str = ""
+    # Where one-time approval codes for bus actions go: a channel the MCP client can't read
+    approval_urls: list[str] = field(default_factory=list)
+
     @property
     def escalation_enabled(self) -> bool:
         return bool(self.opencode_api_key)
@@ -90,4 +97,8 @@ class Config:
             opencode_base_url=os.environ.get("OPENCODE_BASE_URL", "").strip() or "https://opencode.ai/inference/go/openai/v1",
             llm_actions=_bool("LLM_ACTIONS", False),
             escalate_cooldown_hours=_int("ESCALATE_COOLDOWN_HOURS", 24),
+            bus_token=os.environ.get("AGENT_BUS_TOKEN", "").strip(),
+            bus_port=_int("AGENT_BUS_PORT", 8765),
+            bot_alert_url=os.environ.get("BOT_ALERT_URL", "").strip(),
+            approval_urls=_list("APPROVAL_NOTIFY_URLS"),
         )

@@ -6,6 +6,7 @@ import logging
 
 import apprise
 
+from .bus import push_alert
 from .findings import Finding
 from .state import State
 
@@ -15,10 +16,12 @@ ICON = {"info": "✅", "warning": "⚠️", "error": "❌"}
 
 
 class Notifier:
-    def __init__(self, urls: list[str], renotify_hours: int, state: State, dry_run: bool = False):
+    def __init__(self, urls: list[str], renotify_hours: int, state: State, dry_run: bool = False,
+                 bot_url: str = "", bot_token: str = ""):
         self.renotify_hours = renotify_hours
         self.state = state
         self.dry_run = dry_run  # dry-run "would fix" lines repeat each cycle, so dedupe them too
+        self.bot_url, self.bot_token = bot_url, bot_token  # Discord bot first, Apprise as fallback
         self.apobj = apprise.Apprise()
         for url in urls:
             if not self.apobj.add(url):
@@ -44,6 +47,8 @@ class Notifier:
         log.info("%s\n%s", title, body)
         for f in fresh:
             self.state.mark("notified", f.key)
+        if self.bot_url and push_alert(self.bot_url, self.bot_token, "sonarr", title, body, fresh, diagnosis):
+            return
         if len(self.apobj):
             if not self.apobj.notify(title=title, body=body):
                 log.warning("One or more notification targets failed")
