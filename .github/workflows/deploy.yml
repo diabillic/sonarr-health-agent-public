@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Build the image
         run: |
-          if [ -f Dockerfile ]; then docker build --build-arg REVISION="$GITHUB_SHA" -t agent:ci .
+          if [ -f Dockerfile ]; then docker build --pull --build-arg PATCHED_AT="$(date -u +%s)" --build-arg REVISION="$GITHUB_SHA" -t agent:ci .
           else echo "No Dockerfile yet"; fi
 
   # Deploys only from main, never for pull requests, and only once AGENT_HOST is configured
@@ -40,9 +40,14 @@ jobs:
   deploy:
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.AGENT_HOST != ''
-    runs-on: [self-hosted, proxmox]
+    # The runner of the agent's environment: PRIORITY=low deploys from the low-priority runners
+    # to the low-priority Docker host, anything else from the high-priority runner.
+    runs-on: ${{ vars.PRIORITY == 'low' && fromJSON('["self-hosted", "low-priority"]') || fromJSON('["self-hosted", "proxmox"]') }}
     env:
       AGENT_HOST: ${{ vars.AGENT_HOST }}
+      AGENT_NAME: sonarr-agent
+      PRIORITY: ${{ vars.PRIORITY }}
+      BUS_HOST_PORT: ${{ vars.BUS_HOST_PORT }}
     steps:
       - uses: actions/checkout@v5
 
@@ -69,20 +74,24 @@ jobs:
         run: |
           [ -n "$AGENT_HOST" ] || { echo "::error::repo variable AGENT_HOST is not set"; exit 1; }
           [ -n "$SONARR_URL" ] && [ -n "$SONARR_API_KEY" ] || { echo "::error::SONARR_URL (variable) and SONARR_API_KEY (secret) are required"; exit 1; }
-          mkdir -p stage
-          cp -r sonarr_agent requirements.txt stage/
+          [ -f Dockerfile ] || { echo "::error::no Dockerfile yet (dockerfile-agent generates it)"; exit 1; }
+          case "${PRIORITY:-high}" in high|low) ;; *) echo "::error::PRIORITY must be high or low"; exit 1;; esac
+          mkdir -p stage/context
+          cp -r sonarr_agent requirements.txt Dockerfile .dockerignore stage/context/
           (umask 077; : > stage/agent.env)
           for v in SONARR_URL SONARR_PUBLIC_URL DRY_RUN INTERVAL_MINUTES HEALTH_IGNORE STALL_MINUTES \
                    MASS_STALL_THRESHOLD OPENCODE_MODEL OPENCODE_BASE_URL LLM_ACTIONS AGENT_BUS_PORT BOT_ALERT_URL AGENT_BUS_TOKEN APPROVAL_NOTIFY_URLS APPROVAL_MODE \
                    SONARR_API_KEY OPENCODE_API_KEY NOTIFY_URLS; do
             if [ -n "${!v}" ]; then printf '%s=%s\n' "$v" "${!v}" >> stage/agent.env; fi
           done
-          echo "$GITHUB_SHA" > stage/REVISION
+          publish=""
+          [ -z "$BUS_HOST_PORT" ] || publish="$BUS_HOST_PORT:${AGENT_BUS_PORT:-8765}"
+          printf 'REVISION=%s\nPUBLISH=%s\nPRIORITY=%s-priority\n' "$GITHUB_SHA" "$publish" "${PRIORITY:-high}" > stage/deploy.env
 
-      - name: Ship and install
+      - name: Ship, build and run
         run: |
-          rsync -a --delete --exclude '__pycache__' stage/ "deploy@$AGENT_HOST:staging/"
-          ssh "deploy@$AGENT_HOST" sudo /usr/local/sbin/sonarr-agent-install
+          rsync -a --delete --exclude '__pycache__' stage/ "deploy@$AGENT_HOST:staging/$AGENT_NAME/"
+          ssh "deploy@$AGENT_HOST" sudo /usr/local/sbin/agent-deploy "$AGENT_NAME"
 
       - name: Clean up rendered secrets
         if: always()
