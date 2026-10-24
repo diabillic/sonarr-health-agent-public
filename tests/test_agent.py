@@ -531,3 +531,20 @@ def test_hermes_plugin_asks_when_it_cannot_read_config(tmp_path, monkeypatch):
     monkeypatch.setattr(p, "_load_config", lambda: (_ for _ in ()).throw(ImportError("No module named 'yaml'")))
     d = p.pre_tool_call("mcp__sonarr__get_queue", {})
     assert d["action"] == "approve" and "every tool asks" in d["message"]
+
+
+def test_health_fails_when_a_loop_is_overdue_or_an_endpoint_is_down(tmp_path, monkeypatch):
+    from sonarr_agent import health
+
+    monkeypatch.setenv("HEALTH_DIR", str(tmp_path / "health"))
+    assert health.check()[0] == ["nothing has checked in yet"]
+    health.beat("main", 60)
+    problems, fine = health.check()
+    assert not problems and fine[0].startswith("main ran")
+    health.beat("slow", -5)
+    assert health.check()[0][0].startswith("slow: overdue by 5s")
+    health.reset()
+    health.beat("main", 60)
+    health.endpoint("bus", "http://127.0.0.1:9/health")  # nothing listens on the discard port
+    problems, _ = health.check(timeout=2)
+    assert len(problems) == 1 and problems[0].startswith("bus: ")

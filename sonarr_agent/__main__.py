@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 import requests
 
+from . import health
 from .bus import Approvals, BusTool, Runtime, serve_mcp
 from .config import Config
 from .escalate import _build_tools, escalate
@@ -21,6 +22,8 @@ from .sonarr import Sonarr, SonarrError
 from .state import State
 
 log = logging.getLogger("sonarr_agent")
+
+CYCLE_GRACE = 15 * 60  # longest a cycle (checks plus an LLM diagnosis) should take
 
 # Health sources whose problems the checks above already own.
 HANDLED_SOURCES = {HEALTH_SOURCE}
@@ -99,8 +102,10 @@ def main() -> None:
     notifier = Notifier(cfg.notify_urls, cfg.renotify_hours, state, cfg.dry_run, cfg.bot_alert_url, cfg.bus_token)
     runtime = Runtime("sonarr", revision=_revision())
     approvals = Approvals("sonarr", cfg.approval_urls, mode=cfg.approval_mode)
+    health.reset()
     if cfg.bus_token and cfg.bus_port and not args.once:
         serve_mcp("0.0.0.0", cfg.bus_port, cfg.bus_token, bus_tools(cfg, runtime), "sonarr-agent", approvals)
+        health.endpoint("agent bus", f"http://127.0.0.1:{cfg.bus_port}/health")
     log.info(
         "Starting: sonarr=%s dry_run=%s escalation=%s llm_actions=%s bus=%s approvals=%s/%s bot_alerts=%s interval=%smin",
         cfg.sonarr_url, cfg.dry_run, cfg.escalation_enabled, cfg.llm_actions,
@@ -108,6 +113,7 @@ def main() -> None:
     )
 
     while True:
+        health.beat("checks", cfg.interval_minutes * 60 + CYCLE_GRACE)
         try:
             findings = run_cycle(cfg, sonarr, state, notifier, runtime)
             log.info("Cycle done: %d finding(s)", len(findings))
