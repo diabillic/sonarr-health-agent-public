@@ -15,7 +15,7 @@
 - push_alert(): POST a notification digest to a bot; the caller falls back to Apprise if
   the bot can't be reached.
 
-Standard library plus requests (alert push) and apprise (approval codes).
+Standard library plus requests (alert push) and notice.py (approval messages).
 """
 
 from __future__ import annotations
@@ -30,8 +30,9 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
-import apprise
 import requests
+
+from .notice import Message, Outbox, Section
 
 log = logging.getLogger(__name__)
 
@@ -138,20 +139,22 @@ class Approvals:
         if mode not in ("code", "client"):
             raise ValueError(f"APPROVAL_MODE must be 'code' or 'client', not {mode!r}")
         self.agent, self.ttl, self.max_attempts, self.mode = agent, ttl_minutes * 60, max_attempts, mode
-        self.apobj = apprise.Apprise()
-        for url in notify_urls:
-            if not self.apobj.add(url):
-                log.warning("Ignoring invalid approval notification URL (scheme %s)", url.split(":", 1)[0])
+        self.outbox = Outbox(notify_urls, "approval notification")
         self._pending: dict[str, PendingAction] = {}
         self._lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
-        return len(self.apobj) > 0
+        return len(self.outbox) > 0
 
-    def _notify(self, title: str, body: str) -> bool:
+    def _notify(self, title: str, level: str, action: PendingAction, *lines: str) -> bool:
+        """An embed with the exact call in a code block, then the given lines."""
+        call = action.describe().replace("`", "'")
+        sections = [Section("", [f"```\n{call}\n```"], bullets=False)]
+        sections += [Section("", [line], bullets=False) for line in lines]
         try:
-            return bool(self.apobj.notify(title=title, body=body))
+            return self.outbox.send(Message(title, level, sections, f"{self.agent.title()} agent",
+                                            f"Action {action.id}"))
         except Exception as exc:  # a broken webhook must never let an action through
             log.warning("Approval notification failed: %s", exc)
             return False
@@ -166,16 +169,15 @@ class Approvals:
             return {"status": "refused", "reason": "Actions need an audit channel (APPROVAL_NOTIFY_URLS) and none is "
                                                    "configured on this agent."}
         action = PendingAction(secrets.token_hex(3), tool, dict(args), "", 0)
-        if not self._notify(f"{self.agent} agent: running an approved action",
-                            f"▶️ `{action.id}` {action.describe()} (approved in your assistant)"):
+        if not self._notify("▶️ Running an approved action", "info", action, "*Approved in your assistant.*"):
             return {"status": "refused", "reason": "The action couldn't be announced to the audit channel, so it was not run."}
         log.info("Client-approved action %s: running %s", action.id, tool.name)
         try:
             result = tool.fn(**action.args)
         except Exception as exc:
-            self._notify(f"{self.agent} agent: action failed", f"❌ `{action.id}` {action.describe()}: {exc}")
+            self._notify("❌ Action failed", "error", action, f"**Error:** {exc}")
             raise
-        self._notify(f"{self.agent} agent: action done", f"✅ `{action.id}` {action.describe()}: {str(result)[:500]}")
+        self._notify("✅ Action done", "ok", action, "**Result**\n" + _code_block(result))
         return {"status": "done", "action": action.describe(), "result": result}
 
     def request(self, tool: BusTool, args: dict) -> dict:
@@ -189,9 +191,9 @@ class Approvals:
                 del self._pending[k]
             self._pending[action.id] = action
         sent = self._notify(
-            f"{self.agent} agent: approval code {action.code}",
-            f"Code **{action.code}** approves action `{action.id}`: {action.describe()}\n"
-            f"Expires in {self.ttl // 60} minutes. Only give it to your assistant if you want this to run.",
+            f"🔐 Approval code {action.code}", "warning", action,
+            f"Code **{action.code}** approves this action.",
+            f"*Expires in {self.ttl // 60} minutes. Only give it to your assistant if you want this to run.*",
         )
         if not sent:
             with self._lock:
@@ -219,8 +221,8 @@ class Approvals:
                 if left <= 0:
                     del self._pending[action.id]
                     log.warning("Approval for action %s cancelled after %d wrong codes", action.id, action.attempts)
-                    self._notify(f"{self.agent} agent: action cancelled",
-                                 f"Action `{action.id}` ({action.describe()}) was cancelled after {action.attempts} wrong codes.")
+                    self._notify("🚫 Action cancelled", "warning", action,
+                                 f"Cancelled after {action.attempts} wrong codes.")
                     return {"status": "refused", "reason": "Wrong code; the action has been cancelled."}
                 return {"status": "refused", "reason": f"Wrong code; {left} attempt(s) left. Ask the operator again."}
             del self._pending[action.id]
@@ -338,6 +340,12 @@ def serve_mcp(host: str, port: int, token: str, tools: list[BusTool], server_nam
     threading.Thread(target=server.serve_forever, name="agent-bus", daemon=True).start()
     log.info("Agent bus: MCP on %s:%s/mcp with %d tools", host, server.server_address[1], len(tools))
     return server
+
+
+def _code_block(value: Any, limit: int = 900) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, indent=1, default=str)
+    text = text.replace("`", "'")
+    return f"```\n{text[:limit]}{'…' if len(text) > limit else ''}\n```"
 
 
 def push_alert(url: str, token: str, agent: str, title: str, body: str, findings: list, diagnosis: str | None) -> bool:

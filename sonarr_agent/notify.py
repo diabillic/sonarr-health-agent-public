@@ -1,18 +1,17 @@
-"""Notifications via Apprise (Discord, Pushover, ntfy, Telegram, email, ... by URL)."""
+"""Notifications: Discord embeds, or any Apprise URL as markdown (see notice.py)."""
 
 from __future__ import annotations
 
 import logging
 
-import apprise
-
 from .bus import push_alert
 from .findings import Finding
+from .notice import Outbox, digest
 from .state import State
 
 log = logging.getLogger(__name__)
 
-ICON = {"info": "✅", "warning": "⚠️", "error": "❌"}
+AUTHOR = "Sonarr agent"
 
 
 class Notifier:
@@ -22,10 +21,7 @@ class Notifier:
         self.state = state
         self.dry_run = dry_run  # dry-run "would fix" lines repeat each cycle, so dedupe them too
         self.bot_url, self.bot_token = bot_url, bot_token  # Discord bot first, Apprise as fallback
-        self.apobj = apprise.Apprise()
-        for url in urls:
-            if not self.apobj.add(url):
-                log.warning("Ignoring invalid notification URL (scheme %s)", url.split(":", 1)[0])
+        self.outbox = Outbox(urls)
 
     def send(self, findings: list[Finding], diagnosis: str | None = None) -> None:
         """Send one digest per cycle. Fixes always go out; open issues repeat only every renotify_hours."""
@@ -36,19 +32,13 @@ class Notifier:
         if not fresh and not diagnosis:
             return
 
-        fixed = [f for f in fresh if f.resolved]
-        open_ = [f for f in fresh if not f.resolved]
-        lines = [f"{ICON.get(f.severity, '•')} {f.summary}" for f in fixed + open_]
-        if diagnosis:
-            lines += ["", "🧠 Diagnosis:", diagnosis]
-        title = f"Sonarr agent: {len(fixed)} fixed, {len(open_)} need attention"
-        body = "\n".join(lines)
-
-        log.info("%s\n%s", title, body)
+        msg = digest(AUTHOR, fresh, diagnosis=diagnosis,
+                     footer="Dry run: nothing is changed" if self.dry_run else "",
+                     fixed_heading="🧪 Would fix (dry run)" if self.dry_run else "✅ Fixed")
+        body = msg.markdown()
+        log.info("%s\n%s", msg.title, body)
         for f in fresh:
             self.state.mark("notified", f.key)
-        if self.bot_url and push_alert(self.bot_url, self.bot_token, "sonarr", title, body, fresh, diagnosis):
+        if self.bot_url and push_alert(self.bot_url, self.bot_token, "sonarr", msg.title, body, fresh, diagnosis):
             return
-        if len(self.apobj):
-            if not self.apobj.notify(title=title, body=body):
-                log.warning("One or more notification targets failed")
+        self.outbox.send(msg)
