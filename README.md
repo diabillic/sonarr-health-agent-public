@@ -41,6 +41,26 @@ files, or run `RefreshMonitoredDownloads` / `ImportListSync` / `CheckHealth`. Of
 
 ## Deployment
 
+Every push to `main` runs the tests. The deploy job then sends the build context (the generated
+`Dockerfile` and `.dockerignore`, `requirements.txt` and the package) and a rendered `agent.env` to
+a Docker host. There, the root-owned `agent-deploy` builds the image and replaces the container,
+and rolls back if the new one doesn't stay up. Each build pulls the newest base image and runs
+`apt-get full-upgrade`, so every deployed image is fully patched. State lives in the
+`sonarr-agent-data` volume.
+
+| Variable | Expected value |
+|---|---|
+| `AGENT_HOST` | Address of the Docker host. |
+| `PRIORITY` | `high` (default) or `low`. Picks the deploying runner (`[self-hosted, proxmox]` or `[self-hosted, low-priority]`) and sets the container label `homelab.priority`. |
+| `BUS_HOST_PORT` | Optional. Host port for the agent bus when several agents share a host. The container still listens on `AGENT_BUS_PORT`. |
+
+To prepare a Docker host, run `deploy/docker-host.sh` from the dockerfile-agent repository. It
+installs `agent-deploy`, creates the `deploy` user, allows only the given runners in, and turns
+on unattended security upgrades. The LXC deployment below (`deploy/provision.sh`) still works as
+an alternative.
+
+### LXC deployment (alternative)
+
 ```
  GitHub ──push──▶ runner LXC (gh-runner) ──ssh deploy@──▶ agent LXC (sonarr-agent) ──▶ Sonarr API
                   self-hosted, labels               systemd: sonarr-agent.service
