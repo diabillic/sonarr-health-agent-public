@@ -315,15 +315,15 @@ def test_escalation_disabled_without_key(tmp_path):
 
 # --- agent bus (MCP endpoint for the Discord bot, alert hand-off) ---
 
-class FakeApprise:
+class FakeOutbox:
     def __init__(self, sent, ok=True):
         self.sent, self.ok = sent, ok
 
     def __len__(self):
         return 1
 
-    def notify(self, title, body):
-        self.sent.append((title, body))
+    def send(self, msg):
+        self.sent.append((msg.title, msg.markdown()))
         return self.ok
 
 
@@ -334,7 +334,7 @@ def test_approvals_codes_attempts_expiry_and_fail_closed():
     sent = []
     ap = Approvals("sonarr", [])
     assert ap.request(tool, {"queue_id": 1})["status"] == "refused"  # no approval channel: no actions
-    ap.apobj = FakeApprise(sent)
+    ap.outbox = FakeOutbox(sent)
     req = ap.request(tool, {"queue_id": 1})
     code = sent[-1][0].split()[-1]
     assert len(code) == 6 and code.isdigit() and code not in json.dumps(req) and ran == []
@@ -348,7 +348,7 @@ def test_approvals_codes_attempts_expiry_and_fail_closed():
     assert ap.confirm(req["action_id"], sent[-1][0].split()[-1])["status"] == "refused" and ran == []
     req = ap.request(tool, {"queue_id": 3})
     assert ap.cancel(req["action_id"])["status"] == "cancelled"
-    ap.apobj = FakeApprise(sent, ok=False)  # code can't be delivered: nothing is queued
+    ap.outbox = FakeOutbox(sent, ok=False)  # code can't be delivered: nothing is queued
     assert ap.request(tool, {"queue_id": 4})["status"] == "refused" and not ap._pending
 
 
@@ -374,7 +374,7 @@ def test_bus_mcp_endpoint_end_to_end(tmp_path):
         BusTool("boom", "fails", schema(), lambda: 1 / 0),
     ]
     approvals, sent = Approvals("sonarr", []), []
-    approvals.apobj = FakeApprise(sent)
+    approvals.outbox = FakeOutbox(sent)
     server = serve_mcp("127.0.0.1", 0, "s3cret", tools, "sonarr-agent", approvals)
     url = f"http://127.0.0.1:{server.server_address[1]}/mcp"
     try:
@@ -423,7 +423,7 @@ def test_alerts_go_to_bot_first_then_fall_back(tmp_path, monkeypatch):
     sent, pushed = [], []
     st = State(str(tmp_path / "s.json"))
     n = notify.Notifier([], 12, st, bot_url="http://bot:8766/alert", bot_token="t")
-    n.apobj = type("A", (), {"__len__": lambda s: 1, "notify": lambda s, title, body: sent.append(title) or True})()
+    n.outbox = type("O", (), {"send": lambda s, msg: sent.append(msg.title) or True})()
     monkeypatch.setattr(notify, "push_alert", lambda *a: pushed.append(a[2:5]) or True)
     n.send([Finding("k1", "broken", "error")])
     assert len(pushed) == 1 and pushed[0][0] == "sonarr" and sent == []
@@ -455,23 +455,23 @@ def test_client_approval_mode_runs_audited_and_fails_closed():
     tool = BusTool("remove_queue_item", "remove", schema(), lambda queue_id: events.append(("ran", queue_id)) or "removed",
                    read_only=False)
 
-    class Recorder(FakeApprise):
-        def notify(self, title, body):
-            events.append(("notice", title))
+    class Recorder(FakeOutbox):
+        def send(self, msg):
+            events.append(("notice", msg.title))
             return self.ok
 
     ap = Approvals("sonarr", [], mode="client")
     assert ap.handle(tool, {"queue_id": 1})["status"] == "refused" and events == []  # no audit channel: no action
-    ap.apobj = Recorder([])
+    ap.outbox = Recorder([])
     out = ap.handle(tool, {"queue_id": 2})
     assert out == {"status": "done", "action": "remove_queue_item(queue_id=2)", "result": "removed"}
     assert [e[0] for e in events] == ["notice", "ran", "notice"]  # announced BEFORE it runs, result after
     assert ap.tools() == []  # no code tools in client mode
     events.clear()
-    ap.apobj = Recorder([], ok=False)  # can't announce: refuse without running
+    ap.outbox = Recorder([], ok=False)  # can't announce: refuse without running
     assert ap.handle(tool, {"queue_id": 3})["status"] == "refused" and ("ran", 3) not in events
     boom = BusTool("run_command", "x", schema(), lambda: 1 / 0, read_only=False)
-    ap.apobj = Recorder([])
+    ap.outbox = Recorder([])
     with pytest.raises(ZeroDivisionError):
         ap.handle(boom, {})
     assert "failed" in events[-1][1]
