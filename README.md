@@ -144,6 +144,10 @@ cat /opt/sonarr-agent/app/REVISION                     # deployed commit
 State (stall timers, cooldowns, notification dedupe) is `/var/lib/sonarr-agent/state.json`;
 deleting it just restarts the timers.
 
+The container has a Docker health check (`python -m sonarr_agent.health`): it turns `unhealthy` when a
+check cycle is more than 15 minutes overdue (`INTERVAL_MINUTES` plus 15) or the agent bus stops
+answering `/health`. `docker inspect --format '{{json .State.Health}}' sonarr-agent` shows why.
+
 ## Agent bus (MCP for an assistant such as Hermes Agent)
 
 Optional. When `AGENT_BUS_TOKEN` is set, the agent serves its tools at `http://<agent>:8765/mcp`
