@@ -1,4 +1,4 @@
-"""Thin client for the Sonarr v4 API (/api/v3)."""
+"""Thin client for the Sonarr API at /api/v3: Sonarr v4, and v5 (which still serves it, as deprecated)."""
 
 from __future__ import annotations
 
