@@ -31,7 +31,7 @@ MAX_TURNS = 15
 SECRET_RE = re.compile(r"(?i)(api[_-]?key|apikey|token|password|secret)([\"'=:\s]+)([^\s&\"',}]+)")
 SAFE_COMMANDS = ["RefreshMonitoredDownloads", "ImportListSync", "CheckHealth"]
 
-SYSTEM_PROMPT = """You are the on-call diagnostician for a home media stack: Sonarr v4 in Docker, \
+SYSTEM_PROMPT = """You are the on-call diagnostician for a home media stack: Sonarr (v4 or v5) in Docker, \
 SABnzbd as the download client, and Trakt import lists. A rule-based agent has already handled \
 the routine cases (Trakt token renewal, blocked imports with clean candidates, stalled or failed \
 downloads) and is handing you the problems it could not resolve.

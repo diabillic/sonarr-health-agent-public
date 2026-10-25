@@ -1,6 +1,6 @@
 # sonarr-health-agent
 
-A small service that watches a Sonarr v4 instance (SABnzbd + Trakt lists), fixes the
+A small service that watches a Sonarr v4 or v5 instance (SABnzbd + Trakt lists), fixes the
 routine breakages itself, and hands anything unusual to an LLM (via OpenCode Go) for a
 diagnosis that lands in your notifications. Runs as a systemd service in a Proxmox LXC, deployed by GitHub
 Actions on a self-hosted runner in a second LXC.
@@ -21,6 +21,19 @@ Actions on a self-hosted runner in a second LXC.
 
 Season packs are one download with many queue records; everything is grouped by
 `downloadId` so each download is acted on once.
+
+## Sonarr versions
+
+Works with **Sonarr v4 and v5** (checked against v5.0.0.2742). The agent talks to `/api/v3`, which v4
+uses and v5 still serves, though v5 marks it deprecated (`GET /api` reports `"current": "v5"`,
+`"deprecated": ["v3"]`). Everything the agent reads from v3 is unchanged on v5; v5 only adds fields.
+It stays on v3 until the v5 API's manual import and write calls (import list fixes, queue removal,
+commands) are verified: v5's `/manualimport` behaves differently. If a later v5 release drops v3, every
+cycle reports Sonarr as unreachable with a 404, which is the cue to move the client to `/api/v5`.
+
+Sonarr v5 adds an `AllowedHostsCheck` health warning while **Settings → General → Allowed Hosts** is
+empty, which the agent reports like any other warning. Either fill in Allowed Hosts (include the host in
+`SONARR_URL`, or the agent's requests get rejected) or add `AllowedHostsCheck` to `HEALTH_IGNORE`.
 
 ## LLM diagnosis (OpenCode Go)
 
