@@ -559,3 +559,4 @@ def test_discord_posts_are_sent_under_the_agents_own_name(monkeypatch):
     assert notice.Outbox([url]).send(notice.Message("hi"))
     notice.Outbox([url], username="Someone else").send(notice.Message("hi"))
     assert [p["username"] for p in posted] == ["sonarr-agent", "Someone else"]
+    assert posted[0]["avatar_url"].endswith("/png/sonarr.png")
