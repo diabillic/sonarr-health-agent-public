@@ -560,3 +560,21 @@ def test_discord_posts_are_sent_under_the_agents_own_name(monkeypatch):
     notice.Outbox([url], username="Someone else").send(notice.Message("hi"))
     assert [p["username"] for p in posted] == ["sonarr-agent", "Someone else"]
     assert posted[0]["avatar_url"].endswith("/png/sonarr.png")
+
+
+def test_undelivered_digest_is_retried(tmp_path):
+    from sonarr_agent import notify
+    from sonarr_agent.findings import Finding
+    st = State(str(tmp_path / "s.json"))
+    n = notify.Notifier([], 12, st)
+    sent, ok = [], [False]
+    n.outbox = type("O", (), {"send": lambda s, msg: sent.append(msg.markdown()) or ok[0]})()
+    stuck = Finding("queue:1", "stuck download", "warning")
+    fixed = Finding("queue:2", "removed a stalled download", "info", resolved=True)
+    n.send([stuck, fixed], "diagnosis text")  # the post fails
+    assert st["notified"] == {}
+    ok[0] = True
+    n.send([stuck])  # the fix isn't found again, but it's still owed
+    assert len(sent) == 2 and "removed a stalled download" in sent[1] and "diagnosis text" in sent[1]
+    n.send([stuck])
+    assert len(sent) == 2  # delivered: nothing is repeated
